@@ -43,6 +43,12 @@ from . import TransientError
 
 SUPPORTED_METRICS = {"followers"}
 
+# Direct API (no browser): web_profile_info with the logged-in session.
+# No automation fingerprints at all — just an HTTP client with cookies.
+# This runs BEFORE the browser strategies; browser stays as fallback.
+_WEB_PROFILE_INFO = "https://www.instagram.com/api/v1/users/web_profile_info/?username={}"
+_X_IG_APP_ID = "936619743392459"  # Instagram web app ID (stable for years)
+
 # Matches the Chromium build bundled with Playwright 1.48.0.
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -63,6 +69,59 @@ def _parse_compact(s: str) -> int:
         return int(Decimal(s) * mult)
     except (InvalidOperation, ValueError):
         raise ValueError(f"unparseable count: {s}")
+
+
+def _session_cookies() -> dict:
+    """Parse IG_COOKIES env into a name->value dict (empty if unset)."""
+    raw = os.environ.get("IG_COOKIES", "")
+    if not raw:
+        return {}
+    try:
+        return {c["name"]: c["value"] for c in json.loads(raw)
+                if isinstance(c, dict) and "name" in c and "value" in c}
+    except Exception:
+        return {}
+
+
+def _direct_fetch(handle: str) -> int | None:
+    """Strategy 0: direct web_profile_info API with session cookies, no browser.
+    No automation fingerprints at all — just an HTTP client with cookies.
+    Returns None when unavailable (caller falls through to browser).
+    """
+    cookies = _session_cookies()
+    if not cookies.get("sessionid"):
+        return None  # no logged-in session: browser path only
+    ig_names = {"sessionid", "ds_user_id", "csrftoken", "mid", "ig_did",
+                "datr", "rur", "dpr", "shbid", "shbts", "wd"}
+    headers = {
+        "user-agent": _UA,
+        "x-ig-app-id": _X_IG_APP_ID,
+        "x-csrftoken": cookies.get("csrftoken", ""),
+        "x-requested-with": "XMLHttpRequest",
+        "referer": f"https://www.instagram.com/{handle}/",
+        "cookie": "; ".join(f"{k}={v}" for k, v in cookies.items() if k in ig_names),
+    }
+    try:
+        r = cr.get(_WEB_PROFILE_INFO.format(handle), headers=headers,
+                   impersonate="chrome120", timeout=30)
+    except Exception:
+        return None
+    if r.status_code != 200:
+        return None  # 403/429/404: let the browser path decide NOT_FOUND vs transient
+    try:
+        data = json.loads(r.text or "{}")
+    except ValueError:
+        return None
+    user = (data.get("data") or {}).get("user")
+    if not user:
+        return None
+    if str(user.get("username", "")).lower() != handle.lower():
+        return None  # wrong user payload
+    try:
+        cnt = int((user.get("edge_followed_by") or {}).get("count") or 0)
+    except (TypeError, ValueError):
+        return None
+    return cnt if cnt > 0 else None
 
 
 class InstagramScraper:
@@ -204,6 +263,13 @@ class InstagramScraper:
         return await self._scrape(handle)
 
     async def _scrape(self, handle: str) -> int | None:
+        # Strategy 0: direct API with session cookies, no browser at all.
+        # No automation fingerprints — just an HTTP client. Falls through
+        # to the browser path when unavailable.
+        direct = await asyncio.to_thread(_direct_fetch, handle)
+        if direct:
+            print(f"[instagram] @{handle}: direct API hit ({direct})", flush=True)
+            return direct
         await self._ensure_alive()
         if not self._context:
             raise TransientError("instagram browser not initialized")
@@ -211,6 +277,17 @@ class InstagramScraper:
         # Stealth evasions: Instagram serves empty shells to detected
         # automation even with a valid logged-in session.
         await stealth_async(page)
+        # Bandwidth guard (proxy cost): follower counts come from XHR JSON and
+        # embedded HTML only — images/video/fonts are pure bytes. Blocking them
+        # cuts most of each page load: faster scrapes over slow proxies and far
+        # fewer metered residential GB (5 markets, ~720 scrapes/day at 10-min TTL).
+        async def _drop_heavy(route):
+            if route.request.resource_type in ("image", "media", "font"):
+                await route.abort()
+            else:
+                await route.continue_()
+
+        await page.route("**/*", _drop_heavy)
         captured: list = []
 
         def on_response(resp):
