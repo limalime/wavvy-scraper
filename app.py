@@ -86,7 +86,8 @@ _cache: dict[tuple[str, str, str], tuple[float, dict]] = {}
 _locks = {name: asyncio.Lock() for name in PLATFORMS}
 # A platform whose credentials/browser fail to initialize does not take down
 # the other three: it is marked unavailable and answers 503 until configured.
-_available: dict[str, bool] = {}
+# Platforms without a startup step (tiktok, spotify) are always available.
+_available: dict[str, bool] = {name: True for name in PLATFORMS}
 # Circuit breaker: {platform: (consecutive_failures, open_until)}
 _breaker: dict[str, tuple[int, float]] = {}
 _BREAKER_THRESHOLD = 3
