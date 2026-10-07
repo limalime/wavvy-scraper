@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets — never commit
+.env
+*.env
+
+# Runtime data (sessions, sqlite pools) — local only
+/data/
+*.db
+ig_storage.json
+accounts.db
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
