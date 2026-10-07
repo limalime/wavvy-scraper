@@ -37,6 +37,7 @@ from decimal import Decimal, InvalidOperation
 
 from playwright.async_api import async_playwright
 from playwright_stealth import stealth_async
+from curl_cffi import requests as cr
 
 from . import TransientError
 
@@ -78,7 +79,21 @@ class InstagramScraper:
     def _proxies() -> list:
         # IG_PROXY, IG_PROXY_2, ... — multiple residential proxies rotate
         # on every browser (re)launch: redundancy + load spreading.
+        # Format: http://user:pass@host:port (scheme + auth required).
         return [v for k, v in sorted(os.environ.items()) if k.startswith("IG_PROXY") and v]
+
+    async def _check_proxy(self, proxy: str) -> bool:
+        """Quick connectivity check: can we reach instagram.com via this proxy?"""
+        def _check():
+            try:
+                r = cr.head("https://www.instagram.com/", proxy=proxy, timeout=15)
+                ok = r.status_code < 500
+                print(f"[instagram] proxy check: HTTP {r.status_code} -> {'OK' if ok else 'FAIL'}", flush=True)
+                return ok
+            except Exception as e:
+                print(f"[instagram] proxy check failed: {type(e).__name__}: {e}", flush=True)
+                return False
+        return await asyncio.to_thread(_check)
 
     async def _launch(self) -> None:
         if self._pw is None:
@@ -88,8 +103,11 @@ class InstagramScraper:
         if proxies:
             proxy = proxies[self._proxy_index % len(proxies)]
             self._proxy_index += 1
-            launch["proxy"] = {"server": proxy}
             print(f"[instagram] using proxy #{self._proxy_index} of {len(proxies)}", flush=True)
+            if not await self._check_proxy(proxy):
+                print(f"[instagram] proxy #{self._proxy_index} unreachable, launching without proxy", flush=True)
+            else:
+                launch["proxy"] = {"server": proxy}
         self._browser = await self._pw.chromium.launch(**launch)
         ctx: dict = {
             "viewport": {"width": 1366, "height": 768},
