@@ -27,6 +27,8 @@ Anti rate-limit, layered (most block-happy platform):
   6. Optional IG_PROXY env: datacenter IP reputation is the main block vector;
      a residential/mobile proxy is the biggest single lever if blocks persist.
 """
+import asyncio
+import json
 import os
 import random
 import re
@@ -86,6 +88,22 @@ class InstagramScraper:
         if os.path.exists(self._storage_path):
             ctx["storage_state"] = self._storage_path
         self._context = await self._browser.new_context(**ctx)
+        # Optional logged-in session: IG_COOKIES as a JSON cookie array
+        # (export via the Cookie-Editor browser extension while logged in
+        # to instagram.com). A logged-in session is trusted far more than
+        # an anonymous datacenter visit — this is the free alternative to
+        # IG_PROXY when Instagram shows login walls.
+        raw = os.environ.get("IG_COOKIES", "")
+        if raw:
+            try:
+                cookies = [
+                    c for c in json.loads(raw)
+                    if isinstance(c, dict) and "instagram.com" in str(c.get("domain", ""))
+                ]
+                if cookies:
+                    await self._context.add_cookies(cookies)
+            except Exception:
+                pass  # malformed: fall back to anonymous
 
     async def start(self) -> None:
         await self._launch()
