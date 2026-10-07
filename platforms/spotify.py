@@ -33,6 +33,12 @@ _OVERVIEW_HASH = "1ac33ddab5d39a3a9c27802774e6d78b9405cc188c6f75aed007df2a32737c
 _NEXT_DATA_RE = re.compile(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.S)
 _TOKEN_REFRESH_MARGIN = 60  # seconds before expiry
 
+# kworb.net publishes a daily top-artists table with monthly listeners,
+# keyed by Spotify artist ID in the row link. Plain HTML, no auth, not
+# IP-blocked — the reliable source for monthly_listeners when Spotify's
+# anonymous token endpoints refuse datacenter IPs.
+_KWORB_URL = "https://kworb.net/spotify/listeners.html"
+
 _token_lock = threading.Lock()
 _token = {"value": None, "exp": 0.0}
 
@@ -161,7 +167,35 @@ def _stats_for(artist_id: str) -> dict | None:
     return stats
 
 
+def _kworb_monthly_listeners(artist_id: str) -> int | None:
+    """Monthly listeners from kworb.net's daily table. Returns None when the
+    artist isn't listed or the layout changed (caller falls back)."""
+    try:
+        r = cr.get(_KWORB_URL, impersonate="chrome120", timeout=30)
+    except Exception:
+        return None
+    if r.status_code != 200:
+        return None
+    m = re.search(
+        r"artist/" + re.escape(artist_id) + r"_songs\.html" + r"\">[^<]*</a></div></td><td>([\d,]+)</td>",
+        r.text or "",
+    )
+    if not m:
+        return None
+    try:
+        value = int(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def _fetch_sync(artist_id: str, metric: str) -> int | None:
+    if metric == "monthly_listeners":
+        # kworb first: no auth, not IP-blocked, and daily freshness is fine
+        # for a 28-day rolling metric. Pathfinder stays as the fallback.
+        value = _kworb_monthly_listeners(artist_id)
+        if value:
+            return value
     stats = _stats_for(artist_id)
     if stats is None:
         return None
