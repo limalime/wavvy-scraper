@@ -186,7 +186,7 @@ class InstagramScraper:
 
         def on_response(resp):
             url = resp.url
-            if "/graphql" in url or "query_hash" in url:
+            if "/graphql" in url or "query_hash" in url or "/api/v1/users/" in url:
                 captured.append(resp)
 
         page.on("response", on_response)
@@ -209,18 +209,18 @@ class InstagramScraper:
             }
             print(f"[instagram] @{handle}: url={page.url} title={title!r} {markers}", flush=True)
 
-            # Strategy 1: intercepted GraphQL (exact count, username-verified).
+            # Strategy 1: intercepted API responses (exact count, username-verified).
             for r in captured:
                 try:
                     if "application/json" not in r.headers.get("content-type", ""):
                         continue
                     j = await r.json()
-                    user = (j.get("data") or {}).get("user") or (j.get("graphql") or {}).get("user")
+                    user = (j.get("data") or {}).get("user") or (j.get("graphql") or {}).get("user") or j.get("user")
                     if not user:
                         continue
                     if str(user.get("username", "")).lower() != handle:
                         continue  # another user's payload (suggested/viewer)
-                    cnt = (user.get("edge_followed_by") or {}).get("count")
+                    cnt = (user.get("edge_followed_by") or {}).get("count") or user.get("follower_count")
                     if cnt:
                         await self._save_session()
                         return int(cnt)
