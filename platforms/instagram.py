@@ -49,6 +49,51 @@ SUPPORTED_METRICS = {"followers"}
 _WEB_PROFILE_INFO = "https://www.instagram.com/api/v1/users/web_profile_info/?username={}"
 _X_IG_APP_ID = "936619743392459"  # Instagram web app ID (stable for years)
 
+# Apify fallback (paid): apify/instagram-profile-scraper via run-sync API.
+# Used ONLY when free methods fail. At ~$0.0026/profile, 5 profiles hourly
+# ≈ $9.50/month. Set APIFY_TOKEN env to enable; unset = skip (free-only).
+_APIFY_ACTOR = "apify~instagram-profile-scraper"
+_APIFY_URL = f"https://api.apify.com/v2/acts/{_APIFY_ACTOR}/run-sync-get-dataset-items"
+
+
+def _apify_fetch(handle: str) -> int | None:
+    """Paid fallback: Apify instagram-profile-scraper. Returns None when
+    APIFY_TOKEN unset or the run fails (caller treats as transient)."""
+    token = os.environ.get("APIFY_TOKEN", "")
+    if not token:
+        return None
+    try:
+        r = cr.post(
+            _APIFY_URL,
+            params={"token": token},
+            json={"usernames": [handle]},
+            timeout=120,
+        )
+    except Exception as e:
+        print(f"[instagram] apify error: {type(e).__name__}", flush=True)
+        return None
+    if r.status_code != 200:
+        print(f"[instagram] apify HTTP {r.status_code}", flush=True)
+        return None
+    try:
+        items = json.loads(r.text or "[]")
+    except ValueError:
+        return None
+    if not items:
+        return None
+    item = items[0] if isinstance(items, list) else {}
+    if not isinstance(item, dict) or item.get("error"):
+        return None
+    if str(item.get("username", "")).lower() != handle.lower():
+        return None
+    try:
+        cnt = int(item.get("followersCount") or 0)
+    except (TypeError, ValueError):
+        return None
+    if cnt > 0:
+        print(f"[instagram] @{handle}: apify hit ({cnt})", flush=True)
+    return cnt if cnt > 0 else None
+
 # Matches the Chromium build bundled with Playwright 1.48.0.
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -265,11 +310,18 @@ class InstagramScraper:
     async def _scrape(self, handle: str) -> int | None:
         # Strategy 0: direct API with session cookies, no browser at all.
         # No automation fingerprints — just an HTTP client. Falls through
-        # to the browser path when unavailable.
+        # when unavailable.
         direct = await asyncio.to_thread(_direct_fetch, handle)
         if direct:
             print(f"[instagram] @{handle}: direct API hit ({direct})", flush=True)
             return direct
+        # Strategy 1 (paid): Apify when APIFY_TOKEN is set — skip the flaky
+        # browser entirely. Otherwise fall through to the browser path.
+        if os.environ.get("APIFY_TOKEN"):
+            apify = await asyncio.to_thread(_apify_fetch, handle)
+            if apify:
+                return apify
+            raise TransientError("instagram apify fallback failed")
         await self._ensure_alive()
         if not self._context:
             raise TransientError("instagram browser not initialized")
