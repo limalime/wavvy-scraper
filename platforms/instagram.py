@@ -24,8 +24,9 @@ Anti rate-limit, layered (most block-happy platform):
      UA matches the actual Chromium build (130 for Playwright 1.48.0).
   4. Per-platform lock in app.py: Instagram scrapes run strictly serially.
   5. Long TTL cache in app.py (15 min): follower counts move slowly anyway.
-  6. Optional IG_PROXY env: datacenter IP reputation is the main block vector;
-     a residential/mobile proxy is the biggest single lever if blocks persist.
+  6. Optional IG_PROXY / IG_PROXY_2 / ... env: datacenter IP reputation is
+     the main block vector; residential/mobile proxies rotate on every
+     browser (re)launch for redundancy.
 """
 import asyncio
 import json
@@ -71,14 +72,24 @@ class InstagramScraper:
         self._browser = None
         self._context = None
         self._storage_path = os.environ.get("IG_STORAGE_PATH", "/data/ig_storage.json")
+        self._proxy_index = 0
+
+    @staticmethod
+    def _proxies() -> list:
+        # IG_PROXY, IG_PROXY_2, ... — multiple residential proxies rotate
+        # on every browser (re)launch: redundancy + load spreading.
+        return [v for k, v in sorted(os.environ.items()) if k.startswith("IG_PROXY") and v]
 
     async def _launch(self) -> None:
         if self._pw is None:
             self._pw = await async_playwright().start()
         launch: dict = {"headless": True}
-        proxy = os.environ.get("IG_PROXY", "")
-        if proxy:
+        proxies = self._proxies()
+        if proxies:
+            proxy = proxies[self._proxy_index % len(proxies)]
+            self._proxy_index += 1
             launch["proxy"] = {"server": proxy}
+            print(f"[instagram] using proxy #{self._proxy_index} of {len(proxies)}", flush=True)
         self._browser = await self._pw.chromium.launch(**launch)
         ctx: dict = {
             "viewport": {"width": 1366, "height": 768},
