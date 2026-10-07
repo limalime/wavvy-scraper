@@ -205,7 +205,8 @@ class InstagramScraper:
             resp = await page.goto(
                 f"https://www.instagram.com/{handle}/",
                 wait_until="domcontentloaded",
-                timeout=45000,
+                # Free/shared proxies are slow: full page + JS needs room.
+                timeout=int(os.environ.get("IG_GOTO_TIMEOUT", "90000")),
             )
             # Human-like pause: let the page settle and XHRs land.
             await page.wait_for_timeout(random.randint(2500, 4500))
