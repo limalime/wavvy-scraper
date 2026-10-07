@@ -43,27 +43,64 @@ _stats_cache: dict[str, tuple[float, dict]] = {}
 _STATS_TTL = 600
 
 
-def _read_token() -> tuple[str, float]:
+def _read_token_embed() -> tuple[str, float] | None:
+    """Anonymous session from the embed page's __NEXT_DATA__. Returns None
+    (instead of raising) so the caller can try the next strategy."""
     try:
         r = cr.get(_EMBED_URL, impersonate="chrome120", timeout=30)
-    except Exception as e:
-        raise TransientError(f"spotify embed page failed: {type(e).__name__}: {e}")
+    except Exception:
+        return None
     if r.status_code in (403, 429):
-        raise TransientError(f"spotify embed page HTTP {r.status_code} (blocked)")
+        return None
     m = _NEXT_DATA_RE.search(r.text or "")
     if not m:
-        raise TransientError("spotify embed page has no __NEXT_DATA__ (layout changed?)")
+        return None
     try:
         data = json.loads(m.group(1))
     except ValueError:
-        raise TransientError("spotify embed page JSON unparseable")
+        return None
     session = ((data.get("props") or {}).get("pageProps") or {}).get("state", {}).get("settings", {}).get("session", {})
     token = session.get("accessToken")
     exp_ms = session.get("accessTokenExpirationTimestampMs")
     if not token:
-        raise TransientError("no anonymous session in spotify embed page")
-    exp = float(exp_ms) / 1000 if exp_ms else time.time() + 1800
-    return token, exp
+        return None
+    return token, (float(exp_ms) / 1000 if exp_ms else time.time() + 1800)
+
+
+def _read_token_cookie_flow() -> tuple[str, float] | None:
+    """Fallback: cookie-based get_access_token, the same endpoint the web
+    player itself uses. Needs a session with sp_t/sp_dc cookies first."""
+    try:
+        s = cr.Session(impersonate="chrome120")
+        s.get("https://open.spotify.com/", timeout=30)
+        r = s.get(
+            "https://open.spotify.com/get_access_token?reason=transport&productType=web_player",
+            timeout=30,
+        )
+    except Exception:
+        return None
+    if r.status_code != 200:
+        return None
+    try:
+        data = json.loads(r.text or "{}")
+    except ValueError:
+        return None
+    token = data.get("accessToken")
+    exp_ms = data.get("accessTokenExpirationTimestampMs")
+    if not token:
+        return None
+    return token, (float(exp_ms) / 1000 if exp_ms else time.time() + 1800)
+
+
+def _read_token() -> tuple[str, float]:
+    for strategy in (_read_token_embed, _read_token_cookie_flow):
+        try:
+            result = strategy()
+        except Exception:
+            result = None
+        if result:
+            return result
+    raise TransientError("no anonymous spotify session (embed page + token endpoint both refused)")
 
 
 def _access_token(force: bool = False) -> str:
