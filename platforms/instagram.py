@@ -91,19 +91,42 @@ class InstagramScraper:
         # Optional logged-in session: IG_COOKIES as a JSON cookie array
         # (export via the Cookie-Editor browser extension while logged in
         # to instagram.com). A logged-in session is trusted far more than
-        # an anonymous datacenter visit — this is the free alternative to
-        # IG_PROXY when Instagram shows login walls.
+        # an anonymous datacenter visit — the free alternative to IG_PROXY.
+        # Cookie-Editor's export format differs from Playwright's: normalize
+        # field names or add_cookies() silently rejects everything.
         raw = os.environ.get("IG_COOKIES", "")
         if raw:
             try:
-                cookies = [
-                    c for c in json.loads(raw)
-                    if isinstance(c, dict) and "instagram.com" in str(c.get("domain", ""))
-                ]
-                if cookies:
-                    await self._context.add_cookies(cookies)
-            except Exception:
-                pass  # malformed: fall back to anonymous
+                loaded = 0
+                for c in json.loads(raw):
+                    if not isinstance(c, dict):
+                        continue
+                    if "instagram.com" not in str(c.get("domain", "")):
+                        continue
+                    same_site = str(c.get("sameSite", "")).lower()
+                    cookie = {
+                        "name": c["name"],
+                        "value": c["value"],
+                        "domain": c["domain"],
+                        "path": c.get("path", "/"),
+                    }
+                    if c.get("expirationDate"):
+                        cookie["expires"] = float(c["expirationDate"])
+                    if c.get("httpOnly"):
+                        cookie["httpOnly"] = True
+                    if c.get("secure"):
+                        cookie["secure"] = True
+                    if same_site in ("no_restriction", "none"):
+                        cookie["sameSite"] = "None"
+                    elif same_site == "lax":
+                        cookie["sameSite"] = "Lax"
+                    elif same_site == "strict":
+                        cookie["sameSite"] = "Strict"
+                    await self._context.add_cookies([cookie])
+                    loaded += 1
+                print(f"[instagram] loaded {loaded} session cookies", flush=True)
+            except Exception as e:
+                print(f"[instagram] IG_COOKIES rejected: {type(e).__name__}: {e}", flush=True)
 
     async def start(self) -> None:
         await self._launch()
@@ -171,6 +194,9 @@ class InstagramScraper:
             )
             # Human-like pause: let the page settle and XHRs land.
             await page.wait_for_timeout(random.randint(2500, 4500))
+
+            title = await page.title()
+            print(f"[instagram] @{handle}: url={page.url} title={title!r}", flush=True)
 
             # Strategy 1: intercepted GraphQL (exact count, username-verified).
             for r in captured:
