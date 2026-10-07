@@ -35,6 +35,7 @@ import re
 from decimal import Decimal, InvalidOperation
 
 from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 
 from . import TransientError
 
@@ -178,6 +179,9 @@ class InstagramScraper:
         if not self._context:
             raise TransientError("instagram browser not initialized")
         page = await self._context.new_page()
+        # Stealth evasions: Instagram serves empty shells to detected
+        # automation even with a valid logged-in session.
+        await stealth_async(page)
         captured: list = []
 
         def on_response(resp):
@@ -196,7 +200,14 @@ class InstagramScraper:
             await page.wait_for_timeout(random.randint(2500, 4500))
 
             title = await page.title()
-            print(f"[instagram] @{handle}: url={page.url} title={title!r}", flush=True)
+            html = await page.content()
+            markers = {
+                "has_login_form": "loginForm" in html or 'name="username"' in html,
+                "has_profile_header": 'property="og:title"' in html,
+                "has_shared_data": "edge_followed_by" in html,
+                "len": len(html),
+            }
+            print(f"[instagram] @{handle}: url={page.url} title={title!r} {markers}", flush=True)
 
             # Strategy 1: intercepted GraphQL (exact count, username-verified).
             for r in captured:
